@@ -1,0 +1,90 @@
+name: Publish Python SDK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish-python-sdk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, Publish, and Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must look like v3.0.0"
+            exit 1
+          fi
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.3"
+          cache: "pip"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Verify package metadata
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text())
+          assert data["project"]["name"] == "cs2cap", data["project"]["name"]
+          assert data["project"]["version"] == "${{ steps.versions.outputs.version }}", data["project"]["version"]
+          PY
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check distributions
+        run: twine check dist/*
+
+      - name: Verify wheel install
+        run: |
+          set -euo pipefail
+          python -m venv .venv-package-check
+          . .venv-package-check/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import cs2cap
+
+          assert cs2cap is not None
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.versions.outputs.release_tag }}
+          name: CS2Cap Python SDK ${{ steps.versions.outputs.release_tag }}
+          body: |
+            `pip install cs2cap==${{ steps.versions.outputs.version }}`
+          files: |
+            dist/*
